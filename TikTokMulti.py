@@ -12,13 +12,16 @@
 
 import argparse
 import configparser
+import csv
+import datetime
 import json
 import os
+import random
 import re
 import requests
 import sys
 import time
-
+import pandas as pd
 
 class TikTok():
     # 初始化
@@ -38,6 +41,8 @@ class TikTok():
         configfile = "conf.conf"
         self.cf = self.read_configfile(configfile)
         self.data_list = []
+        self.file = 'Download'
+        self.sec_id = None
 
     def read_configfile(self,configfile):
         # 实例化读取配置文件
@@ -158,7 +163,7 @@ class TikTok():
                 for one in re.finditer(r'user\/([\d\D]*)',str(r.url)):
                     key = one.group(1)
             print('[  提示  ]:用户的sec_id=%s\r' % key)
-
+        self.sec_id = key
         # 第一次访问页码
         max_cursor = 0
 
@@ -196,7 +201,7 @@ class TikTok():
                 result = self.filter_high_like_data(html['aweme_list'],self.digg_count)
                 print('[  提示  ]:抓获数据成功!\r')
                 # 处理第一页视频信息
-                self.video_info(result, max_cursor)
+                #self.video_info(result, max_cursor)
             else:
                 max_cursor = html['max_cursor']
                 self.next_data(max_cursor)
@@ -235,10 +240,11 @@ class TikTok():
             if self.Isend == False:
                 # 下一页值
                 max_cursor = html['max_cursor']
-                result = self.filter_high_like_data(html['aweme_list'],self.digg_count)
+                result = self.filter_high_like_data(html['aweme_list'],self.digg_count,max_cursor)
                 print('[  提示  ]:%d页抓获数据成功!\r' % max_cursor)
                 # 处理下一页视频信息
                 self.video_info(result, max_cursor)
+
             else:
                 self.Isend == True
                 print('[  提示  ]:%d页抓获数据失败!\r' % max_cursor)
@@ -246,11 +252,69 @@ class TikTok():
 
     def filter_high_like_data(self, content: list, digg_count:int):
         result = []
+        data_list=[]
         for i in content:
+            data_info={}
             if i['statistics']['digg_count'] >= eval(digg_count):
                 result.append(i)
-        print('[  提示  ]:%d条数据超过%d个点赞!\r' % (len(result),eval(self.digg_count)))
+                data_info.update({'日期':datetime.datetime.now().strftime('%Y-%m-%d')})
+                data_info.update({'作者':i['author']['nickname']})
+                data_info.update({'作者主页地址':self.uid})
+                data_info.update({'作者ID':i['author']['short_id']})
+                data_info.update({'作品id':i['aweme_id']})
+                data_info.update({'作品地址':'https://www.douyin.com/video/%s?modeFrom=userPost&secUid=%s'%(i['aweme_id'],self.sec_id)})
+                data_info.update({'标题':i['desc']})
+                data_info.update({'统计-点赞数':i['statistics']['digg_count']})
+                data_info.update({'统计-评论数':i['statistics']['comment_count']})
+                data_info.update({'统计-分享数':i['statistics']['share_count']})
+                cursor = 5
+                comments_txts =[]
+                for j in range(1,5):
+                    cursor*=j
+                    comments, hasmore, cursor,comments_txt = self.get_comment(aweme_id=i['aweme_id'],max_cursor=cursor)
+                    if comments_txt:
+                        comments_txts.append(comments_txt)
+                data_info.update({'评论内容':comments_txts})
+                data_list.append(data_info)
+        print('[  提示  ]:%d条数据超过%d个点赞!\r' % (len(result),eval(digg_count)))
+        header=['日期','作者', '作者主页地址','作者ID','作品地址', '作品id', '标题', '统计-点赞数', '统计-评论数', '统计-分享数','评论内容']
+        self.data_to_csv(self.file, data_list, header)
         return result
+
+    def data_to_csv(self,path, data, header):
+        """数据写入csv"""
+        with open(path+'\\statics.csv', 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=header)  # 提前预览列名，当下面代码写入数据时，会将其一一对应。
+            writer.writeheader()  # 写入列名
+            writer.writerows(data)  # 写入数据
+
+    def get_comment(self,aweme_id,max_cursor):
+        url = "https://aweme.snssdk.com/aweme/v1/comment/list/"
+        comment_params = {
+            "count": str(20),
+            "cursor": str(max_cursor),
+            "comment_style": '2',
+            "aweme_id": aweme_id,
+            "digged_cid": "",
+        }
+        resp = requests.get(url=url,params=comment_params)
+        comments_res = resp.json() if resp is not None else {"status_code": -1}
+        hasmore = comments_res.get("hasmore", False)
+        cursor = comments_res.get("cursor", max_cursor)
+        comments = comments_res.get("comments", [])
+        comments_txt = []
+        for comment in comments:
+            real_comment = comment.get("reply_comment")[0] if comment.get("reply_comment") else comment
+            upvote_count = real_comment.get("digg_count")
+            comment_item = {
+                "text": real_comment.get("text", ''),
+                "upvote_count": upvote_count
+            }
+            comments_txt.append(comment_item)
+        if comments_txt:
+            print(comments_txt)
+        return comments, hasmore, cursor,comments_txt
+
 
     # 处理视频信息
     def video_info(self, result, max_cursor):
@@ -263,10 +327,6 @@ class TikTok():
                 aweme_id.append(str(result[v]['aweme_id']))
                 nickname.append(str(result[v]['author']['nickname']))
                 # dynamic_cover.append(str(result[v]['video']['dynamic_cover']['url_list'][0]))
-                item={}
-                item.update({'抖音昵称':self.nickname[0]})
-                item.update({'主页地址':self.uid})
-                item.update({'主页地址':self.uid})
             except Exception as error:
                 # print(error)
                 pass
@@ -330,7 +390,6 @@ class TikTok():
             jx_url = f'https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={aweme_id[count]}'  # 官方接口
             js = json.loads(requests.get(
                 url=jx_url, headers=self.headers).text)
-
             creat_time = time.strftime("%Y-%m-%d %H.%M.%S", time.localtime(js['item_list'][0]['create_time']))
             return creat_time
         except Exception as error:
